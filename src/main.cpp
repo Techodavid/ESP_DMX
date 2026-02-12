@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <SPIFFS.h>
 
 #include "driver/uart.h"
 #include "freertos/queue.h"
@@ -12,124 +13,100 @@
 #define DMX_UART UART_NUM_1
 #define DMX_RX_PIN 5
 #define DMX_BUF_SIZE 600
-
-uint16_t slotIndex = 0;
-bool receiving = false;
-
-
 // ==========================================
 
+
+// =====================================================
+// ================= DMX RECEIVER ======================
+// =====================================================
+
 class DmxReceiver {
+
 public:
-    uint8_t universe[513]; // [0]=startcode, [1..512]=channels
+    uint8_t universe[513] = {0};
+
     uint32_t lastFrameMicros = 0;
     uint32_t frameInterval = 0;
     uint32_t breakCount = 0;
     uint32_t frameCount = 0;
 
+    bool signalPresent = false;
+
+private:
     QueueHandle_t uart_queue;
+    uint16_t slotIndex = 0;
+    bool receiving = false;
+    uint32_t lastFrameMillis = 0;
+
+public:
 
     void begin() {
-        uart_config_t uart_config = {
-            .baud_rate = 250000,
-            .data_bits = UART_DATA_8_BITS,
-            .parity = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_2,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
-        };
+
+        uart_config_t uart_config = {};
+        uart_config.baud_rate = 250000;
+        uart_config.data_bits = UART_DATA_8_BITS;
+        uart_config.parity = UART_PARITY_DISABLE;
+        uart_config.stop_bits = UART_STOP_BITS_2;
+        uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
 
         uart_driver_install(DMX_UART, DMX_BUF_SIZE, 0, 20, &uart_queue, 0);
         uart_param_config(DMX_UART, &uart_config);
         uart_set_pin(DMX_UART, UART_PIN_NO_CHANGE, DMX_RX_PIN,
                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
-      //  uart_set_line_inverse(DMX_UART, UART_SIGNAL_RXD_INV); // wichtig bei RS485
         uart_enable_rx_intr(DMX_UART);
     }
 
     void loop() {
 
-    uart_event_t event;
+        uart_event_t event;
 
-    while (xQueueReceive(uart_queue, &event, 0)) {
+        while (xQueueReceive(uart_queue, &event, 0)) {
 
-        if (event.type == UART_BREAK) {
+            if (event.type == UART_BREAK) {
 
-            breakCount++;
+                breakCount++;
 
-            // Neues Frame beginnt
-            slotIndex = 0;
-            receiving = true;
+                uint32_t now = micros();
+                frameInterval = now - lastFrameMicros;
+                lastFrameMicros = now;
 
-            uint32_t now = micros();
-            frameInterval = now - lastFrameMicros;
-            lastFrameMicros = now;
-        }
+                lastFrameMillis = millis();
+                signalPresent = true;
 
-        if (event.type == UART_DATA && receiving) {
+                slotIndex = 0;
+                receiving = true;
+            }
 
-            uint8_t buf[128];
-            int len = uart_read_bytes(DMX_UART, buf, event.size, 0);
+            if (event.type == UART_DATA && receiving) {
 
-            for (int i = 0; i < len; i++) {
+                uint8_t buf[128];
+                int len = uart_read_bytes(DMX_UART, buf, event.size, 0);
 
-                if (slotIndex < 513) {
-                    universe[slotIndex++] = buf[i];
+                for (int i = 0; i < len; i++) {
+                    if (slotIndex < 513) {
+                        universe[slotIndex++] = buf[i];
+                    }
+                }
+
+                if (slotIndex >= 513) {
+                    frameCount++;
+                    receiving = false;
                 }
             }
+        }
 
-            if (slotIndex >= 513) {
-                frameCount++;
-                receiving = false;
-            }
+        // Signal lost detection
+        if (millis() - lastFrameMillis > 200) {
+            signalPresent = false;
         }
     }
-}
-
-
-private:
-    void readFrame() {
-
-    uart_flush_input(DMX_UART);
-    delayMicroseconds(120);
-
-    uint8_t temp[513];
-    int total = 0;
-
-    uint32_t start = millis();
-
-    while ((millis() - start) < 30) {
-
-        int len = uart_read_bytes(
-            DMX_UART,
-            temp + total,
-            sizeof(temp) - total,
-            2 / portTICK_PERIOD_MS
-        );
-
-        if (len > 0) {
-            total += len;
-        } else {
-            // nichts mehr da → Frame vermutlich komplett
-            break;
-        }
-    }
-
-    if (total >= 2 && temp[0] == 0) {
-
-        memset(universe, 0, sizeof(universe));   // vorher alles nullen
-        memcpy(universe, temp, total);           // nur empfangene Slots kopieren
-
-        uint32_t now = micros();
-        frameInterval = now - lastFrameMicros;
-        lastFrameMicros = now;
-        frameCount++;
-    }
-}
-
-
-
 };
+
+
+// =====================================================
+// ================= SYSTEM MONITOR ====================
+// =====================================================
 
 class SystemMonitor {
 public:
@@ -138,17 +115,28 @@ public:
     }
 };
 
+
+// =====================================================
+// ================= WEB INTERFACE =====================
+// =====================================================
+
 class WebInterface {
-public:
+
+private:
     WebServer server{80};
     DmxReceiver* dmx;
     SystemMonitor* monitor;
 
+public:
+
     void begin(DmxReceiver* d, SystemMonitor* m) {
+
         dmx = d;
         monitor = m;
 
-        server.on("/", [&]() { handleRoot(); });
+        server.on("/", [this]() { handleRoot(); });
+        server.on("/data", [this]() { handleData(); });
+
         server.begin();
     }
 
@@ -157,51 +145,72 @@ public:
     }
 
 private:
+
     void handleRoot() {
-        String html = "<html><head><meta http-equiv='refresh' content='1'></head><body>";
 
-        html += "<h2>DMX Debug</h2>";
-        html += "Frames: " + String(dmx->frameCount) + "<br>";
-        html += "Breaks: " + String(dmx->breakCount) + "<br>";
-        html += "Frame Interval (us): " + String(dmx->frameInterval) + "<br>";
-        html += "ESP Temp: " + String(monitor->getTemperature()) + " C<br>";
+        File file = SPIFFS.open("/index.html", "r");
 
-        html += "<h3>Channels 1-16</h3><pre>";
+        if (!file) {
+            server.send(500, "text/plain", "index.html not found");
+            return;
+        }
+
+        server.streamFile(file, "text/html");
+        file.close();
+    }
+
+    void handleData() {
+
+        String json = "{";
+
+        json += "\"frames\":" + String(dmx->frameCount) + ",";
+        json += "\"interval\":" + String(dmx->frameInterval) + ",";
+        json += "\"signal\":" + String(dmx->signalPresent ? "true" : "false") + ",";
+        json += "\"temp\":" + String(monitor->getTemperature()) + ",";
+
+        json += "\"ch\":[";
         for (int i = 1; i <= 16; i++) {
-            html += String(i) + ": " + String(dmx->universe[i]) + "\n";
+            json += String(dmx->universe[i]);
+            if (i < 16) json += ",";
         }
-        html += "</pre>";
+        json += "]";
 
-        html += "<h3>Raw First 32 Bytes</h3><pre>";
-        for (int i = 0; i < 32; i++) {
-            html += String(dmx->universe[i]) + " ";
-        }
-        html += "</pre>";
+        json += "}";
 
-        html += "</body></html>";
-
-        server.send(200, "text/html", html);
+        server.send(200, "application/json", json);
     }
 };
 
-// ================= GLOBALS =================
+
+// =====================================================
+// ================= GLOBALS ===========================
+// =====================================================
+
 DmxReceiver dmx;
 SystemMonitor monitor;
 WebInterface web;
 
-// ==========================================
+
+// =====================================================
+// ================= SETUP / LOOP ======================
+// =====================================================
 
 void setup() {
+
     Serial.begin(115200);
 
     WiFi.softAP(AP_SSID, AP_PASS);
-    Serial.println("AP started");
+
+    if (!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS Mount Failed");
+    }
 
     dmx.begin();
     web.begin(&dmx, &monitor);
 }
 
 void loop() {
+
     dmx.loop();
     web.loop();
 }

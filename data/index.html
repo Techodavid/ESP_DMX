@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>DMX Monitor</title>
+<style>
+body { font-family: monospace; background:#111; color:#0f0; }
+</style>
+</head>
+<body>
+
+<h2>DMX Monitor</h2>
+
+Frames: <span id="frames">0</span><br>
+Interval (µs): <span id="interval">0</span><br>
+ESP Temp: <span id="temp">0</span> °C<br>
+Status: <span id="status">---</span><br><br>
+
+Channels 1–16:
+<pre id="channels"></pre>
+
+<script>
+async function update() {
+    try {
+        const response = await fetch('/data');
+        const data = await response.json();
+
+        document.getElementById('frames').textContent = data.frames;
+        document.getElementById('interval').textContent = data.interval;
+        document.getElementById('temp').textContent = data.temp;
+
+        if (data.signal) {
+            document.getElementById('status').textContent = "Signal OK";
+            document.getElementById('status').style.color = "lime";
+        } else {
+            document.getElementById('status').textContent = "Signal LOST";
+            document.getElementById('status').style.color = "red";
+        }
+
+        let chText = "";
+        for (let i = 0; i < data.ch.length; i++) {
+            chText += (i+1) + ": " + data.ch[i] + "\n";
+        }
+        document.getElementById('channels').textContent = chText;
+
+    } catch {
+        document.getElementById('status').textContent = "No Connection";
+        document.getElementById('status').style.color = "orange";
+    }
+}
+
+setInterval(update, 100);
+update();
+</script>
+
+</body>
+</html>
