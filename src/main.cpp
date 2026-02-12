@@ -169,9 +169,9 @@ private:
         json += "\"temp\":" + String(monitor->getTemperature()) + ",";
 
         json += "\"ch\":[";
-        for (int i = 1; i <= 16; i++) {
+        for (int i = 2; i <= 512; i++) {
             json += String(dmx->universe[i]);
-            if (i < 16) json += ",";
+            if (i < 512) json += ",";
         }
         json += "]";
 

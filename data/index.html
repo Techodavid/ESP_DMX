@@ -17,7 +17,12 @@ ESP Temp: <span id="temp">0</span> °C<br>
 Status: <span id="status">---</span><br><br>
 
 Channels 1–16:
-<pre id="channels"></pre>
+<div id="channels" style="
+display:grid;
+grid-template-columns: repeat(16, 1fr);
+gap:2px;
+font-size:10px;">
+</div>
 
 <script>
 async function update() {
@@ -37,11 +42,23 @@ async function update() {
             document.getElementById('status').style.color = "red";
         }
 
-        let chText = "";
-        for (let i = 0; i < data.ch.length; i++) {
-            chText += (i+1) + ": " + data.ch[i] + "\n";
-        }
-        document.getElementById('channels').textContent = chText;
+       let container = document.getElementById('channels');
+container.innerHTML = "";
+
+for (let i = 0; i < 512; i++) {
+
+    let value = data.ch[i];
+
+    let div = document.createElement("div");
+
+    div.style.border = "1px solid #033";
+    div.style.padding = "2px";
+    div.style.background = "rgb(0," + value + ",0)";
+
+    div.innerHTML = (i+1) + "<br>" + value;
+
+    container.appendChild(div);
+}
 
     } catch {
         document.getElementById('status').textContent = "No Connection";
